@@ -46,30 +46,41 @@ static void makeContextCurrentNSGL(_GLFWwindow* window)
     } // autoreleasepool
 }
 
+static CVReturn nsglDisplayLinkCallback(CVDisplayLinkRef displayLink,
+    const CVTimeStamp* now,
+    const CVTimeStamp* outputTime,
+    CVOptionFlags flagsIn,
+    CVOptionFlags* flagsOut,
+    void* userContext)
+{
+    _GLFWcontextNSGL* nsgl = (_GLFWcontextNSGL*)userContext;
+    NSCondition* intervalCond = nsgl->swapIntervalCond;
+
+    [intervalCond lock];
+    ++nsgl->swapIntervalsPassed;
+    [intervalCond signal];
+    [intervalCond unlock];
+
+    return kCVReturnSuccess;
+}
+
 static void swapBuffersNSGL(_GLFWwindow* window)
 {
     @autoreleasepool {
 
-    // HACK: Simulate vsync with usleep as NSGL swap interval does not apply to
-    //       windows with a non-visible occlusion state
-    if (window->ns.occluded)
+    if (window->context.nsgl.swapInterval > 0)
     {
-        int interval = 0;
-        [window->context.nsgl.object getValues:&interval
-                                  forParameter:NSOpenGLContextParameterSwapInterval];
+        [window->context.nsgl.swapIntervalCond lock];
 
-        if (interval > 0)
+        do
         {
-            const double framerate = 60.0;
-            const uint64_t frequency = _glfwPlatformGetTimerFrequency();
-            const uint64_t value = _glfwPlatformGetTimerValue();
-
-            const double elapsed = value / (double) frequency;
-            const double period = 1.0 / framerate;
-            const double delay = period - fmod(elapsed, period);
-
-            usleep(floorl(delay * 1e6));
+            // do-while guarantees at least one swap interval has occurred.
+            [window->context.nsgl.swapIntervalCond wait];
         }
+        while (window->context.nsgl.swapIntervalsPassed % window->context.nsgl.swapInterval != 0);
+
+        window->context.nsgl.swapIntervalsPassed = 0;
+        [window->context.nsgl.swapIntervalCond unlock];
     }
 
     [window->context.nsgl.object flushBuffer];
@@ -84,8 +95,7 @@ static void swapIntervalNSGL(int interval)
     _GLFWwindow* window = _glfwPlatformGetTls(&_glfw.contextSlot);
     assert(window != NULL);
 
-    [window->context.nsgl.object setValues:&interval
-                              forParameter:NSOpenGLContextParameterSwapInterval];
+    window->context.nsgl.swapInterval = interval;
 
     } // autoreleasepool
 }
@@ -117,6 +127,13 @@ static void destroyContextNSGL(_GLFWwindow* window)
     [window->context.nsgl.pixelFormat release];
     window->context.nsgl.pixelFormat = nil;
 
+    CVDisplayLinkStop(window->context.nsgl.displayLink);
+    CVDisplayLinkRelease(window->context.nsgl.displayLink);
+    window->context.nsgl.displayLink = NULL;
+
+    [window->context.nsgl.swapIntervalCond release];
+    window->context.nsgl.swapIntervalCond = nil;
+
     [window->context.nsgl.object release];
     window->context.nsgl.object = nil;
 
@@ -128,6 +145,8 @@ static void destroyContextNSGL(_GLFWwindow* window)
 //////                       GLFW internal API                      //////
 //////////////////////////////////////////////////////////////////////////
 
+// Initialize OpenGL support
+//
 GLFWbool _glfwInitNSGL(void)
 {
     if (_glfw.nsgl.framework)
@@ -145,10 +164,14 @@ GLFWbool _glfwInitNSGL(void)
     return GLFW_TRUE;
 }
 
+// Terminate OpenGL support
+//
 void _glfwTerminateNSGL(void)
 {
 }
 
+// Create the OpenGL context
+//
 GLFWbool _glfwCreateContextNSGL(_GLFWwindow* window,
                                 const _GLFWctxconfig* ctxconfig,
                                 const _GLFWfbconfig* fbconfig)
@@ -336,6 +359,21 @@ GLFWbool _glfwCreateContextNSGL(_GLFWwindow* window,
 
     [window->context.nsgl.object setView:window->ns.view];
 
+    window->context.nsgl.swapInterval = 0; // Default value of NSGL swap interval
+    window->context.nsgl.swapIntervalsPassed = 0;
+    window->context.nsgl.swapIntervalCond = [[NSCondition alloc] init];
+
+    // Explicitly set NSGL swap interval to 0, since CVDisplayLink will be used
+    // instead.
+    int swapInterval = 0;
+    [window->context.nsgl.object setValues:&swapInterval
+                              forParameter:NSOpenGLContextParameterSwapInterval];
+
+    CVDisplayLinkCreateWithActiveCGDisplays(&window->context.nsgl.displayLink);
+    CVDisplayLinkSetOutputCallback(window->context.nsgl.displayLink, &nsglDisplayLinkCallback, &window->context.nsgl);
+    _glfwUpdateDisplayLinkNSGL(window);
+    CVDisplayLinkStart(window->context.nsgl.displayLink);
+
     window->context.makeCurrent = makeContextCurrentNSGL;
     window->context.swapBuffers = swapBuffersNSGL;
     window->context.swapInterval = swapIntervalNSGL;
@@ -344,6 +382,13 @@ GLFWbool _glfwCreateContextNSGL(_GLFWwindow* window,
     window->context.destroy = destroyContextNSGL;
 
     return GLFW_TRUE;
+}
+
+void _glfwUpdateDisplayLinkNSGL(_GLFWwindow* window)
+{
+    CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(window->context.nsgl.displayLink,
+        [window->context.nsgl.object CGLContextObj],
+        [window->context.nsgl.pixelFormat CGLPixelFormatObj]);
 }
 
 

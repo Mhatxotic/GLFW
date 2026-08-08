@@ -145,11 +145,15 @@ endif()
 if (GLFW_BUILD_COCOA)
     target_link_libraries(glfw PRIVATE "-framework Cocoa"
                                        "-framework IOKit"
-                                       "-framework QuartzCore")
+                                       "-framework CoreFoundation"
+                                       "-framework QuartzCore"
+                                       "-framework CoreVideo")
 
     list(APPEND glfw_PKG_LIBS "-framework Cocoa"
                               "-framework IOKit"
-                              "-framework QuartzCore")
+                              "-framework CoreFoundation"
+                              "-framework QuartzCore"
+                              "-framework CoreVideo")
 endif()
 
 if (GLFW_BUILD_WAYLAND)
